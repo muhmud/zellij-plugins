@@ -9,6 +9,7 @@ SWITCH_APP="zellij-$SWITCH_SESSION_ID"
 
 export SWITCH_SESSION_LIST_FILE="/tmp/switch.zellij.sessions"
 export SWITCH_TAB_LIST_FILE="/tmp/switch.$SWITCH_APP.tabs"
+export SWITCH_TAB_HISTORY_FILE="/tmp/switch.$SWITCH_APP.history"
 export SWITCH_SOCKET_FILE="/tmp/switch.$SWITCH_APP"
 export SWITCH_MOD_KEY=${SWITCH_MOD_KEY:-alt}
 export SWITCH_PANE_MOD_KEY=${SWITCH_PANE_MOD_KEY:-ctrl}
@@ -52,7 +53,6 @@ function claim_focus_window() {
     last_ts=${line%% *}
     last_value=${line#* }
     if [[ "$last_value" == "$value" ]] && [[ -n "$last_ts" ]] && (( now - last_ts < window_ms )); then
-      trace "SUPPRESS duplicate '$value' ($(( now - last_ts ))ms < ${window_ms}ms)"
       exec 9>&-
       return 1
     fi
@@ -108,7 +108,6 @@ function require_live_client() {
   if grep -qx "$client" <<< "$clients"; then
     return 0
   fi
-  trace "client $client not in cached list [$(echo $clients | tr '\n' ',')] - refreshing"
   # Not in the cached list. That is either a stale instance or a client that
   # attached since the list was taken, so confirm against zellij before
   # refusing — otherwise a fresh attach would have a dead keybinding until the
@@ -119,7 +118,6 @@ function require_live_client() {
   if grep -qx "$client" <<< "$clients"; then
     return 0
   fi
-  trace "REJECT client $client; live=[$(echo $clients | tr '\n' ',')]"
   return 1
 }
 
@@ -142,11 +140,6 @@ function claim_interval() {
 # Milliseconds without spawning `date`: this is on the switching path and a
 # process spawn here costs about as much as the work being timed. The separator
 # may be a comma under some locales.
-# Diagnostics for silent drops; cheap enough to leave on.
-function trace() {
-  echo "$(now_ms) ${SWITCH_SESSION_ID:-?} $*" >> /tmp/switch.zellij.trace.log
-}
-
 function now_ms() {
   local micros=${EPOCHREALTIME/[.,]/}
   if [[ -n "$micros" ]]; then
@@ -170,7 +163,6 @@ function reap_orphan_daemons() {
     [[ -S "$sock" ]] || continue        # only the sockets, not the state files
     name=${sock#/tmp/switch.zellij-}
     if ! grep -qx "$name" <<< "$live"; then
-      trace "reaping orphan daemon for gone session '$name'"
       switch --request shutdown --socket-file "$sock" >/dev/null 2>&1 || true
       rm -f "$sock" "$sock".* 2>/dev/null || true
     fi
@@ -190,6 +182,41 @@ function daemon_alive() {
     case "$cmd" in *"--socket-file $SWITCH_SOCKET_FILE "*) return 0 ;; esac
   done
   return 1
+}
+
+# Our own record of which tabs were focused, most recent last.
+#
+# `switch --request add` puts an id on *top* of the stack, so registering a
+# burst of new tabs leaves the last one added looking most-recently-used.
+# Seeding is asynchronous, so it can land after focus has already moved on,
+# burying the tab the user just came from — a switch would then jump to the last
+# tab created rather than the previous one. The daemon's stack cannot be read
+# back, so keeping the order here is what lets seeding restore it.
+readonly SWITCH_HISTORY_DEPTH=20
+
+function record_history() {
+  local -r id=$1
+  # Same reason as the list files: several plugin instances report the same
+  # change, so appending has to be atomic.
+  exec 9>"$SWITCH_TAB_HISTORY_FILE.lock"
+  flock 9
+  echo "$id" >> "$SWITCH_TAB_HISTORY_FILE"
+  if [[ "$(wc -l < "$SWITCH_TAB_HISTORY_FILE")" -gt $((SWITCH_HISTORY_DEPTH * 2)) ]]; then
+    tail -n "$SWITCH_HISTORY_DEPTH" "$SWITCH_TAB_HISTORY_FILE" > "$SWITCH_TAB_HISTORY_FILE.trim" &&
+      mv "$SWITCH_TAB_HISTORY_FILE.trim" "$SWITCH_TAB_HISTORY_FILE"
+  fi
+  exec 9>&-
+}
+
+function reset_history() {
+  : > "$SWITCH_TAB_HISTORY_FILE" 2>/dev/null || true
+}
+
+# The distinct tabs from the history, oldest first, each at the position of its
+# most recent focus.
+function history_order() {
+  [[ -s "$SWITCH_TAB_HISTORY_FILE" ]] || return 0
+  tac "$SWITCH_TAB_HISTORY_FILE" | awk 'NF && !seen[$0]++' | tac
 }
 
 function list_file_contains() {
@@ -224,7 +251,6 @@ function align_list_file() {
   # session always has at least one tab, and a tab at least one pane. Treating
   # a failed query as "all gone" deletes the whole stack.
   if [[ -z "${new_list//[[:space:]]/}" ]]; then
-    trace "skipping reconcile of $(basename "$list_file"): live list empty (query failed?)"
     return 0
   fi
   local ids=()

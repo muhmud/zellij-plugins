@@ -25,4 +25,21 @@ for tab in "$@"; do
     --app "$SWITCH_APP" --id "$tab" >/dev/null 2>&1 || true
   add_to_list_file "$tab" "$SWITCH_TAB_LIST_FILE"
 done
-trace "seeded tabs: $*"
+
+# `add` puts an id on *top* of the stack, so seeding leaves the last tab
+# registered looking most-recently-used, and seeding can land after focus has
+# already moved on — which would send the first switch to the last tab in the
+# session instead of the one just left. Replaying the focus history restores the
+# true order: each `set` lifts its id to the top, so applying them oldest-first
+# leaves the stack honest, right down to the *second* entry, which is the one a
+# switch actually lands on.
+replay="$(history_order)"
+if [[ -z "$replay" ]]; then
+  # Nothing focused on our watch yet, so the live active tab is all we know.
+  replay="$(zj list-tabs --json 2>/dev/null | jq -r '.[] | select(.active) | .tab_id' | head -1)"
+fi
+while IFS= read -r id; do
+  [[ -n "$id" ]] || continue
+  switch --request set --socket-file "$SWITCH_SOCKET_FILE" \
+    --app "$SWITCH_APP" --id "$id" >/dev/null 2>&1 || true
+done <<< "$replay"

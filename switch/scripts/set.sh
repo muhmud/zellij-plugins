@@ -24,9 +24,6 @@ require_live_client "$CLIENT_ID" || exit 0
 # has moved on in the meantime.
 claim_focus "$TAB_ID/$PANE_ID" || exit 0
 
-# Trace, for working out the order the MRU was actually fed.
-echo "$(now_ms) $SWITCH_SESSION_ID tab=$TAB_ID pane=$PANE_ID" \
-  >> "/tmp/switch.zellij.focus.log"
 
 [[ -f "$SWITCH_SESSION_LIST_FILE" ]] || touch "$SWITCH_SESSION_LIST_FILE"
 [[ -f "$SWITCH_TAB_LIST_FILE" ]] || touch "$SWITCH_TAB_LIST_FILE"
@@ -34,9 +31,10 @@ SWITCH_TAB_PANE_LIST_FILE="$SWITCH_TAB_LIST_FILE.$TAB_ID.panes"
 
 # First sighting of this session: bring up its daemon and register the tab app.
 if ! daemon_alive; then
-  # Forget any previous registration: the daemon that held it is gone.
+  # Forget any previous registration: the daemon that held it is gone, and with
+  # it the stack our history described.
   delete_from_list_file "$SWITCH_SESSION_ID" "$SWITCH_SESSION_LIST_FILE"
-  trace "no daemon for $SWITCH_APP - starting one"
+  reset_history
 fi
 if [[ "$(list_file_contains "$SWITCH_SESSION_ID" "$SWITCH_SESSION_LIST_FILE")" == "0" ]]; then
   switch --server --daemonize --socket-file "$SWITCH_SOCKET_FILE" \
@@ -50,6 +48,7 @@ fi
 
 switch --request set --socket-file "$SWITCH_SOCKET_FILE" --app "$SWITCH_APP" --id "$TAB_ID" || true
 add_to_list_file "$TAB_ID" "$SWITCH_TAB_LIST_FILE"
+record_history "$TAB_ID"
 
 # First sighting of this tab: register a per-tab app for its panes.
 if [[ ! -f "$SWITCH_TAB_PANE_LIST_FILE" ]]; then
