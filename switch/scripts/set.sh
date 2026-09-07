@@ -23,7 +23,7 @@ require_live_client "$CLIENT_ID" || exit 0
 claim_focus "$TAB_ID/$PANE_ID" || exit 0
 
 # Trace, for working out the order the MRU was actually fed.
-echo "$(date +%s%3N) $SWITCH_SESSION_ID tab=$TAB_ID pane=$PANE_ID" \
+echo "$(now_ms) $SWITCH_SESSION_ID tab=$TAB_ID pane=$PANE_ID" \
   >> "/tmp/switch.zellij.focus.log"
 
 [[ -f "$SWITCH_SESSION_LIST_FILE" ]] || touch "$SWITCH_SESSION_LIST_FILE"

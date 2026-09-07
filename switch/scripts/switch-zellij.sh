@@ -39,7 +39,7 @@ function claim_focus_window() {
   local -r window_ms=$2
   local -r guard="/tmp/switch.$SWITCH_APP.claim.${value//\//_}"
   local now line last_ts last_value
-  now=$(date +%s%3N)
+  now=$(now_ms)
   if [[ -f "$guard" ]]; then
     line=$(<"$guard")
     last_ts=${line%% *}
@@ -76,10 +76,10 @@ function claim_focus() {
 function require_live_client() {
   local -r client=$1
   local -r cache="/tmp/switch.$SWITCH_APP.clients"
-  local -r ttl_ms=2000
+  local -r ttl_ms=30000
   local now line ts clients
   [[ -n "$client" ]] || return 0        # older plugin builds pass nothing
-  now=$(date +%s%3N)
+  now=$(now_ms)
   clients=""
   if [[ -f "$cache" ]]; then
     line=$(head -1 "$cache")
@@ -97,6 +97,16 @@ function require_live_client() {
     [[ -n "$clients" ]] || return 0
     { echo "$now"; echo "$clients"; } > "$cache"
   fi
+  if grep -qx "$client" <<< "$clients"; then
+    return 0
+  fi
+  # Not in the cached list. That is either a stale instance or a client that
+  # attached since the list was taken, so confirm against zellij before
+  # refusing — otherwise a fresh attach would have a dead keybinding until the
+  # cache expired.
+  clients=$(zj list-clients 2>/dev/null | awk 'NR>1{print $1}')
+  [[ -n "$clients" ]] || return 0
+  { echo "$now"; echo "$clients"; } > "$cache"
   grep -qx "$client" <<< "$clients"
 }
 
@@ -105,7 +115,7 @@ function claim_interval() {
   local -r name=$1 window_ms=$2
   local -r guard="/tmp/switch.$SWITCH_APP.$name.interval"
   local now last
-  now=$(date +%s%3N)
+  now=$(now_ms)
   if [[ -f "$guard" ]]; then
     last=$(<"$guard")
     if [[ -n "$last" ]] && (( now - last < window_ms )); then
@@ -114,6 +124,18 @@ function claim_interval() {
   fi
   echo "$now" > "$guard"
   return 0
+}
+
+# Milliseconds without spawning `date`: this is on the switching path and a
+# process spawn here costs about as much as the work being timed. The separator
+# may be a comma under some locales.
+function now_ms() {
+  local micros=${EPOCHREALTIME/[.,]/}
+  if [[ -n "$micros" ]]; then
+    echo $(( micros / 1000 ))
+  else
+    date +%s%3N
+  fi
 }
 
 function list_file_contains() {
