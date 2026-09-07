@@ -6,7 +6,9 @@
 set -eu -o pipefail
 
 SCRIPT_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
-SWITCH_SESSION_ID="$1"
+# An empty first argument means the plugin did not know the session yet;
+# the zellij server's own environment carries it.
+SWITCH_SESSION_ID="${1:-$ZELLIJ_SESSION_NAME}"
 TAB_ID="$2"
 PANE_ID="$3"
 CLIENT_ID="${4:-}"
@@ -31,6 +33,11 @@ echo "$(now_ms) $SWITCH_SESSION_ID tab=$TAB_ID pane=$PANE_ID" \
 SWITCH_TAB_PANE_LIST_FILE="$SWITCH_TAB_LIST_FILE.$TAB_ID.panes"
 
 # First sighting of this session: bring up its daemon and register the tab app.
+if ! daemon_alive; then
+  # Forget any previous registration: the daemon that held it is gone.
+  delete_from_list_file "$SWITCH_SESSION_ID" "$SWITCH_SESSION_LIST_FILE"
+  trace "no daemon for $SWITCH_APP - starting one"
+fi
 if [[ "$(list_file_contains "$SWITCH_SESSION_ID" "$SWITCH_SESSION_LIST_FILE")" == "0" ]]; then
   switch --server --daemonize --socket-file "$SWITCH_SOCKET_FILE" \
     --use-libinput --device "${NIXOS_MACHINE_KEYBOARD}"

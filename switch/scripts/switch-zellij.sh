@@ -177,15 +177,35 @@ function reap_orphan_daemons() {
   done
 }
 
+# Is a daemon actually listening on this session's socket?
+#
+# The session-list file only records that we have seen the session before; it is
+# not evidence the daemon still lives. One can be killed, or die with a crash,
+# and without this check set.sh would never bring it back — leaving switching
+# silently dead for the rest of the session.
+function daemon_alive() {
+  local p cmd
+  for p in $(pgrep -x switch 2>/dev/null); do
+    cmd=$(tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null) || continue
+    case "$cmd" in *"--socket-file $SWITCH_SOCKET_FILE "*) return 0 ;; esac
+  done
+  return 1
+}
+
 function list_file_contains() {
   grep -c "^$1\$" "$2"
 }
 
 function add_to_list_file() {
   local -r id=$1 list_file=$2
+  # Several plugin instances report the same change, so the check-and-append has
+  # to be atomic or the id lands twice (seen as a doubled entry in the list).
+  exec 8>"$list_file.lock"
+  flock 8
   if [[ ! -f "$list_file" ]] || [[ "$(list_file_contains "$id" "$list_file")" == "0" ]]; then
     echo "$id" >> "$list_file"
   fi
+  exec 8>&-
 }
 
 function delete_from_list_file() {
@@ -200,6 +220,13 @@ function delete_from_list_file() {
 function align_list_file() {
   local -r list_file=$1 new_list=$2
   [[ -f "$list_file" ]] || return 0
+  # An empty live list means the query failed, not that everything closed: a
+  # session always has at least one tab, and a tab at least one pane. Treating
+  # a failed query as "all gone" deletes the whole stack.
+  if [[ -z "${new_list//[[:space:]]/}" ]]; then
+    trace "skipping reconcile of $(basename "$list_file"): live list empty (query failed?)"
+    return 0
+  fi
   local ids=()
   while IFS= read -r id; do
     if [[ "$(grep -c "^$id\$" <<< "$new_list")" == "0" ]]; then

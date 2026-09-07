@@ -7,7 +7,9 @@
 set -eu -o pipefail
 
 SCRIPT_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
-SWITCH_SESSION_ID="$1"
+# An empty first argument means the plugin did not know the session yet;
+# the zellij server's own environment carries it.
+SWITCH_SESSION_ID="${1:-$ZELLIJ_SESSION_NAME}"
 CLIENT_ID="${2:-}"
 shift 2 2>/dev/null || shift
 source "$SCRIPT_DIR/switch-zellij.sh"

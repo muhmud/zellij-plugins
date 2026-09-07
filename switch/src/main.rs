@@ -80,9 +80,7 @@ impl State {
         if self.last == Some((tab_id, pane_id)) {
             return;
         }
-        let Some(session) = self.session.clone() else {
-            return; // wait until we know which session we are in
-        };
+        let session = self.session.clone().unwrap_or_default();
         self.last = Some((tab_id, pane_id));
         let set_script = format!("{}/set.sh", self.scripts_dir);
         run_command(
@@ -138,9 +136,7 @@ impl State {
 
     /// Run whatever was waiting on the session name.
     fn flush_pending(&mut self) {
-        let Some(session) = self.session.clone() else {
-            return;
-        };
+        let session = self.session.clone().unwrap_or_default();
         if !self.pending_seed.is_empty() {
             let fresh: Vec<String> = self.pending_seed.iter().map(usize::to_string).collect();
             for id in self.pending_seed.iter() {
@@ -186,8 +182,8 @@ impl ZellijPlugin for State {
         self.client_id = ids.client_id;
         self.tag = format!("p{}c{}", ids.plugin_id, ids.client_id);
         eprintln!(
-            "switch-zellij: loaded, scripts_dir={} tag={}",
-            self.scripts_dir, self.tag
+            "switch-zellij: loaded, scripts_dir={} tag={} session={:?}",
+            self.scripts_dir, self.tag, self.session
         );
     }
 
@@ -285,14 +281,11 @@ impl ZellijPlugin for State {
         if message.name != PIPE_NAME {
             return false;
         }
-        let Some(session) = self.session.clone() else {
-            // Held rather than dropped: the session name usually arrives within
-            // milliseconds, and dropping made the first press after opening a
-            // session do nothing.
-            eprintln!("switch-zellij: pipe before the session is known, queueing");
-            self.pending_switch = message.payload.clone();
-            return false;
-        };
+        // The session name may not be known yet: SessionUpdate is not
+        // guaranteed to reach an instance that loads late, and an instance that
+        // waits for it would drop every request forever. Passing an empty name
+        // lets the script fall back to the server's own ZELLIJ_SESSION_NAME.
+        let session = self.session.clone().unwrap_or_default();
         let payload = message.payload.unwrap_or_default();
         self.dispatch_switch(&session, payload.trim());
         false
