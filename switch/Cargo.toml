@@ -1,0 +1,15 @@
+[package]
+name = "switch-zellij"
+version = "0.1.0"
+edition = "2021"
+description = "Zellij integration for `switch`: MRU alt-tab across tabs and panes"
+
+[dependencies]
+# Pinned to the 0.44 line to match the running zellij (0.44.3). A plugin built
+# against a different zellij API than the host runs it will fail to load.
+zellij-tile = "0.44"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
