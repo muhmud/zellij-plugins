@@ -14,7 +14,7 @@
 //!
 //! The script is invoked as: set.sh <session> <tab_id> <pane_id>
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use zellij_tile::prelude::*;
 
 const DEFAULT_SCRIPTS_DIR: &str = "~/.switch/zellij";
@@ -43,6 +43,13 @@ struct State {
     session: Option<String>,
     /// Position of the active tab, from TabUpdate.
     active_tab: Option<usize>,
+    /// Tabs already registered with the daemon, so each is seeded once.
+    known_tabs: BTreeSet<usize>,
+    /// Work that arrived before the session name was known. Events do not come
+    /// in a guaranteed order, and each instance has its own state, so anything
+    /// needing the session is held until SessionUpdate rather than dropped.
+    pending_seed: BTreeSet<usize>,
+    pending_switch: Option<String>,
     /// tab_id -> current position. The MRU records stable ids, but focusing a
     /// tab takes a position, and positions shift as tabs move or close.
     tab_positions: BTreeMap<usize, u32>,
@@ -92,6 +99,68 @@ impl State {
     }
 }
 
+impl State {
+    /// Ask the daemon for the next id in the requested stack. The focusing
+    /// happens later, when the command result comes back.
+    fn dispatch_switch(&mut self, session: &str, payload: &str) {
+        let (script, scope, reverse) = match payload {
+            "tab" => ("switch.sh", SCOPE_TAB, false),
+            "tab-reverse" => ("switch.sh", SCOPE_TAB, true),
+            "pane" => ("pane-switch.sh", SCOPE_PANE, false),
+            "pane-reverse" => ("pane-switch.sh", SCOPE_PANE, true),
+            other => {
+                eprintln!("switch-zellij: unknown pipe payload {other:?}");
+                return;
+            }
+        };
+        let path = format!("{}/{}", self.scripts_dir, script);
+        let client = self.client_id.to_string();
+        // The pane script needs the tab whose stack to walk; the plugin already
+        // knows it, which saves the script a `zellij action` round trip.
+        let active_tab_id = self.active_tab_id.unwrap_or_default().to_string();
+        let mut args: Vec<&str> = vec![&path, session, &client];
+        if scope == SCOPE_PANE {
+            args.push(&active_tab_id);
+        }
+        if reverse {
+            args.push("--reverse");
+        }
+        // The script resolves an id and prints it; the focusing is done here,
+        // from the result, so no `zellij action` process is needed for it.
+        let mut context = BTreeMap::new();
+        context.insert(CONTEXT_KEY.to_string(), scope.to_string());
+        eprintln!(
+            "switch-zellij: asking for {payload} in {session} tag={}",
+            self.tag
+        );
+        run_command(&args, context);
+    }
+
+    /// Run whatever was waiting on the session name.
+    fn flush_pending(&mut self) {
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        if !self.pending_seed.is_empty() {
+            let fresh: Vec<String> = self.pending_seed.iter().map(usize::to_string).collect();
+            for id in self.pending_seed.iter() {
+                self.known_tabs.insert(*id);
+            }
+            self.pending_seed.clear();
+            let script = format!("{}/add-tabs.sh", self.scripts_dir);
+            let client = self.client_id.to_string();
+            let mut args: Vec<&str> = vec![&script, &session, &client];
+            args.extend(fresh.iter().map(String::as_str));
+            eprintln!("switch-zellij: seeding tabs {fresh:?}");
+            run_command(&args, BTreeMap::new());
+        }
+        if let Some(payload) = self.pending_switch.take() {
+            eprintln!("switch-zellij: replaying queued {payload}");
+            self.dispatch_switch(&session, &payload);
+        }
+    }
+}
+
 impl ZellijPlugin for State {
     fn load(&mut self, configuration: BTreeMap<String, String>) {
         self.scripts_dir = expand_home(
@@ -129,6 +198,7 @@ impl ZellijPlugin for State {
                     if self.session.as_deref() != Some(current.name.as_str()) {
                         eprintln!("switch-zellij: session={}", current.name);
                         self.session = Some(current.name.clone());
+                        self.flush_pending();
                     }
                 }
             }
@@ -137,6 +207,18 @@ impl ZellijPlugin for State {
                     .iter()
                     .map(|t| (t.tab_id, t.position as u32))
                     .collect();
+                // Seed tabs the daemon has not seen. A tab created during a
+                // layout burst may never be reported as focused, and would
+                // otherwise be missing from the stack and unreachable.
+                let fresh: Vec<usize> = tabs
+                    .iter()
+                    .filter(|t| !self.known_tabs.contains(&t.tab_id))
+                    .map(|t| t.tab_id)
+                    .collect();
+                if !fresh.is_empty() {
+                    self.pending_seed.extend(fresh);
+                    self.flush_pending();
+                }
                 if let Some(active) = tabs.iter().find(|t| t.active) {
                     // position indexes into PaneManifest; tab_id is the stable
                     // handle that survives tabs being moved or closed, so that
@@ -204,42 +286,15 @@ impl ZellijPlugin for State {
             return false;
         }
         let Some(session) = self.session.clone() else {
-            eprintln!("switch-zellij: pipe before the session is known, ignoring");
+            // Held rather than dropped: the session name usually arrives within
+            // milliseconds, and dropping made the first press after opening a
+            // session do nothing.
+            eprintln!("switch-zellij: pipe before the session is known, queueing");
+            self.pending_switch = message.payload.clone();
             return false;
         };
-        let source = format!("{:?}", message.source);
         let payload = message.payload.unwrap_or_default();
-        let (script, scope, reverse) = match payload.trim() {
-            "tab" => ("switch.sh", SCOPE_TAB, false),
-            "tab-reverse" => ("switch.sh", SCOPE_TAB, true),
-            "pane" => ("pane-switch.sh", SCOPE_PANE, false),
-            "pane-reverse" => ("pane-switch.sh", SCOPE_PANE, true),
-            other => {
-                eprintln!("switch-zellij: unknown pipe payload {other:?}");
-                return false;
-            }
-        };
-        let path = format!("{}/{}", self.scripts_dir, script);
-        let client = self.client_id.to_string();
-        // The pane script needs the tab whose stack to walk; the plugin already
-        // knows it, which saves the script a `zellij action` round trip.
-        let active_tab_id = self.active_tab_id.unwrap_or_default().to_string();
-        let mut args: Vec<&str> = vec![&path, &session, &client];
-        if scope == SCOPE_PANE {
-            args.push(&active_tab_id);
-        }
-        if reverse {
-            args.push("--reverse");
-        }
-        // The script resolves an id and prints it; the focusing is done here,
-        // from the result, so no `zellij action` process is needed for it.
-        let mut context = BTreeMap::new();
-        context.insert(CONTEXT_KEY.to_string(), scope.to_string());
-        eprintln!(
-            "switch-zellij: asking for {payload} in {session} tag={} source={source}",
-            self.tag
-        );
-        run_command(&args, context);
+        self.dispatch_switch(&session, payload.trim());
         false
     }
 

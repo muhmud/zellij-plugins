@@ -39,21 +39,29 @@ function claim_focus_window() {
   local -r window_ms=$2
   local -r guard="/tmp/switch.$SWITCH_APP.claim.${value//\//_}"
   local now line last_ts last_value
+
+  # The whole read-compare-write has to be atomic: duplicate deliveries arrive
+  # within the same millisecond, and a plain check-then-act lets both through
+  # because neither has written yet when the other reads.
+  exec 9>"$guard.lock"
+  flock 9
+
   now=$(now_ms)
   if [[ -f "$guard" ]]; then
     line=$(<"$guard")
     last_ts=${line%% *}
     last_value=${line#* }
     if [[ "$last_value" == "$value" ]] && [[ -n "$last_ts" ]] && (( now - last_ts < window_ms )); then
+      trace "SUPPRESS duplicate '$value' ($(( now - last_ts ))ms < ${window_ms}ms)"
+      exec 9>&-
       return 1
     fi
   fi
   printf '%s %s\n' "$now" "$value" > "$guard"
+  exec 9>&-
   return 0
 }
 
-# A switch request carries no distinguishing value, so repeats are collapsed on
-# scope alone.
 # Switch requests get a much wider window than focus reports. One keypress has
 # been observed arriving as two pipe deliveries up to ~90ms apart — the scripts
 # take tens of milliseconds, so the duplicate queues behind the first — and each
@@ -100,6 +108,7 @@ function require_live_client() {
   if grep -qx "$client" <<< "$clients"; then
     return 0
   fi
+  trace "client $client not in cached list [$(echo $clients | tr '\n' ',')] - refreshing"
   # Not in the cached list. That is either a stale instance or a client that
   # attached since the list was taken, so confirm against zellij before
   # refusing — otherwise a fresh attach would have a dead keybinding until the
@@ -107,7 +116,11 @@ function require_live_client() {
   clients=$(zj list-clients 2>/dev/null | awk 'NR>1{print $1}')
   [[ -n "$clients" ]] || return 0
   { echo "$now"; echo "$clients"; } > "$cache"
-  grep -qx "$client" <<< "$clients"
+  if grep -qx "$client" <<< "$clients"; then
+    return 0
+  fi
+  trace "REJECT client $client; live=[$(echo $clients | tr '\n' ',')]"
+  return 1
 }
 
 # True at most once per window_ms, for work that need not happen every time.
@@ -129,6 +142,11 @@ function claim_interval() {
 # Milliseconds without spawning `date`: this is on the switching path and a
 # process spawn here costs about as much as the work being timed. The separator
 # may be a comma under some locales.
+# Diagnostics for silent drops; cheap enough to leave on.
+function trace() {
+  echo "$(now_ms) ${SWITCH_SESSION_ID:-?} $*" >> /tmp/switch.zellij.trace.log
+}
+
 function now_ms() {
   local micros=${EPOCHREALTIME/[.,]/}
   if [[ -n "$micros" ]]; then
@@ -136,6 +154,27 @@ function now_ms() {
   else
     date +%s%3N
   fi
+}
+
+# Shut down daemons whose zellij session is gone.
+#
+# zellij has no session-closed hook (the tmux client uses one), so a daemon
+# would otherwise outlive its session — leaking a process per session, and
+# worse, keeping that session name's old MRU so a new session of the same name
+# inherits a stale stack.
+function reap_orphan_daemons() {
+  local live sock name
+  live=$(zellij list-sessions -n 2>/dev/null | grep -v '(EXITED' | awk '{print $1}') || return 0
+  [[ -n "$live" ]] || return 0          # cannot tell; leave everything alone
+  for sock in /tmp/switch.zellij-*; do
+    [[ -S "$sock" ]] || continue        # only the sockets, not the state files
+    name=${sock#/tmp/switch.zellij-}
+    if ! grep -qx "$name" <<< "$live"; then
+      trace "reaping orphan daemon for gone session '$name'"
+      switch --request shutdown --socket-file "$sock" >/dev/null 2>&1 || true
+      rm -f "$sock" "$sock".* 2>/dev/null || true
+    fi
+  done
 }
 
 function list_file_contains() {

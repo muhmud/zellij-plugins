@@ -57,6 +57,8 @@ fi
 # for a few seconds, so sweep at most every 5s.
 if claim_interval reconcile 5000; then
 
+reap_orphan_daemons
+
 # Drop panes that have since closed.
 align_list_file "$SWITCH_TAB_PANE_LIST_FILE" "$(get_pane_list "$TAB_ID")" |
   while IFS= read -r id; do

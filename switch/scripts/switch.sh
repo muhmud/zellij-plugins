@@ -15,4 +15,6 @@ source "$SCRIPT_DIR/switch-zellij.sh"
 require_live_client "$CLIENT_ID" || exit 0
 claim_switch tab || exit 0
 
-switch --request switch --socket-file "$SWITCH_SOCKET_FILE" --app "$SWITCH_APP" "$@" || true
+id="$(switch --request switch --socket-file "$SWITCH_SOCKET_FILE" --app "$SWITCH_APP" "$@" || true)"
+trace "switch tab -> '${id:-<none>}' (mru: $(tr '\n' ',' < "$SWITCH_TAB_LIST_FILE" 2>/dev/null))"
+printf '%s\n' "$id"
