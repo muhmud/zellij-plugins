@@ -17,11 +17,17 @@
 use std::collections::BTreeMap;
 use zellij_tile::prelude::*;
 
-const DEFAULT_SET_SCRIPT: &str = "~/.switch/zellij/set.sh";
+const DEFAULT_SCRIPTS_DIR: &str = "~/.switch/zellij";
+
+/// Pipe name a keybinding must use to reach this plugin. `MessagePlugin`
+/// delivers without creating a pane, and only fires while zellij has focus —
+/// which is what keeps the chord from also switching tabs while you are in
+/// another application.
+const PIPE_NAME: &str = "switch";
 
 #[derive(Default)]
 struct State {
-    set_script: String,
+    scripts_dir: String,
     /// Name of the session we are running in, from SessionUpdate.
     session: Option<String>,
     /// Position of the active tab, from TabUpdate.
@@ -35,6 +41,18 @@ struct State {
 
 register_plugin!(State);
 
+/// Expand a leading `~`. The script is run with `run_command`, which execs
+/// directly rather than through a shell, so nothing else would expand it.
+fn expand_home(path: &str) -> String {
+    match path.strip_prefix("~/") {
+        Some(rest) => match std::env::var("HOME") {
+            Ok(home) => format!("{home}/{rest}"),
+            Err(_) => path.to_string(),
+        },
+        None => path.to_string(),
+    }
+}
+
 impl State {
     /// Tell the daemon about the currently focused tab and pane.
     fn record(&mut self, tab_id: usize, pane_id: u32) {
@@ -45,9 +63,10 @@ impl State {
             return; // wait until we know which session we are in
         };
         self.last = Some((tab_id, pane_id));
+        let set_script = format!("{}/set.sh", self.scripts_dir);
         run_command(
             &[
-                &self.set_script,
+                &set_script,
                 &session,
                 &tab_id.to_string(),
                 &format!("terminal_{pane_id}"),
@@ -60,10 +79,12 @@ impl State {
 
 impl ZellijPlugin for State {
     fn load(&mut self, configuration: BTreeMap<String, String>) {
-        self.set_script = configuration
-            .get("set_script")
-            .cloned()
-            .unwrap_or_else(|| DEFAULT_SET_SCRIPT.to_string());
+        self.scripts_dir = expand_home(
+            configuration
+                .get("scripts_dir")
+                .map(String::as_str)
+                .unwrap_or(DEFAULT_SCRIPTS_DIR),
+        );
         request_permission(&[
             PermissionType::ReadApplicationState,
             PermissionType::RunCommands,
@@ -73,7 +94,7 @@ impl ZellijPlugin for State {
             EventType::TabUpdate,
             EventType::PaneUpdate,
         ]);
-        eprintln!("switch-zellij: loaded, set_script={}", self.set_script);
+        eprintln!("switch-zellij: loaded, scripts_dir={}", self.scripts_dir);
     }
 
     fn update(&mut self, event: Event) -> bool {
@@ -112,6 +133,37 @@ impl ZellijPlugin for State {
             }
             _ => {}
         }
+        false
+    }
+
+    /// A keybinding asking for a switch. Reached by `MessagePlugin`, which
+    /// creates no pane — the reason this is not simply a `Run` binding.
+    fn pipe(&mut self, message: PipeMessage) -> bool {
+        if message.name != PIPE_NAME {
+            return false;
+        }
+        let Some(session) = self.session.clone() else {
+            eprintln!("switch-zellij: pipe before the session is known, ignoring");
+            return false;
+        };
+        let payload = message.payload.unwrap_or_default();
+        let (script, reverse) = match payload.trim() {
+            "tab" => ("switch.sh", false),
+            "tab-reverse" => ("switch.sh", true),
+            "pane" => ("pane-switch.sh", false),
+            "pane-reverse" => ("pane-switch.sh", true),
+            other => {
+                eprintln!("switch-zellij: unknown pipe payload {other:?}");
+                return false;
+            }
+        };
+        let path = format!("{}/{}", self.scripts_dir, script);
+        let mut args: Vec<&str> = vec![&path, &session];
+        if reverse {
+            args.push("--reverse");
+        }
+        eprintln!("switch-zellij: switching {payload} for {session}");
+        run_command(&args, BTreeMap::new());
         false
     }
 

@@ -12,10 +12,9 @@ export SWITCH_TAB_LIST_FILE="/tmp/switch.$SWITCH_APP.tabs"
 export SWITCH_SOCKET_FILE="/tmp/switch.$SWITCH_APP"
 export SWITCH_MOD_KEY=${SWITCH_MOD_KEY:-alt}
 export SWITCH_PANE_MOD_KEY=${SWITCH_PANE_MOD_KEY:-ctrl}
-# Trigger keys, held with the modifiers above. The daemon watches for these
-# itself, so zellij needs no keybinding — and so nothing flashes on screen.
-export SWITCH_TAB_KEY=${SWITCH_TAB_KEY:-a}
-export SWITCH_PANE_KEY=${SWITCH_PANE_KEY:-tab}
+# The trigger keys live in zellij's own keybindings, which pipe to the plugin
+# (see the README): that way the chord only acts while zellij has focus, and no
+# pane is created.
 
 # Always address a specific session: a script invoked by the plugin has no
 # ZELLIJ_SESSION_NAME of its own, and one invoked from a pane may be asked
