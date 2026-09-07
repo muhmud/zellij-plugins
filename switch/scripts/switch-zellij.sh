@@ -19,8 +19,11 @@ export SWITCH_PANE_MOD_KEY=${SWITCH_PANE_MOD_KEY:-ctrl}
 # Always address a specific session: a script invoked by the plugin has no
 # ZELLIJ_SESSION_NAME of its own, and one invoked from a pane may be asked
 # about a different session.
+# Bounded: these run from the plugin on every focus change, so a blocked
+# `zellij action` — a session that has gone away, say — would otherwise leave a
+# stuck process behind each time.
 function zj() {
-  ZELLIJ=0 ZELLIJ_SESSION_NAME="$SWITCH_SESSION_ID" zellij action "$@"
+  timeout 5 env ZELLIJ=0 ZELLIJ_SESSION_NAME="$SWITCH_SESSION_ID" zellij action "$@"
 }
 
 function list_file_contains() {
