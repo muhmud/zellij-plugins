@@ -6,8 +6,13 @@ set -eu -o pipefail
 
 SCRIPT_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
 SWITCH_SESSION_ID="$1"
-shift
+CLIENT_ID="${2:-}"
+shift 2 2>/dev/null || shift
 source "$SCRIPT_DIR/switch-zellij.sh"
+
+require_live_client "$CLIENT_ID" || exit 0
+
+claim_switch pane || exit 0
 
 TAB_ID="$(zj list-tabs --json 2>/dev/null | jq -r '.[] | select(.active) | .tab_id')"
 [[ -n "$TAB_ID" ]] || exit 0

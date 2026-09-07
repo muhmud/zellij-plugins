@@ -26,6 +26,96 @@ function zj() {
   timeout 5 env ZELLIJ=0 ZELLIJ_SESSION_NAME="$SWITCH_SESSION_ID" zellij action "$@"
 }
 
+# Collapse a repeated *identical* event inside a short window.
+#
+# A background plugin is re-loaded on every client attach, so one focus change
+# is reported once per instance, and one keypress can arrive as more than one
+# pipe delivery. Only exact repeats are dropped: a genuinely different event is
+# always let through, so fast movement is never lost.
+#
+# Returns non-zero when this call should be skipped.
+function claim_focus_window() {
+  local -r value=$1
+  local -r window_ms=$2
+  local -r guard="/tmp/switch.$SWITCH_APP.claim.${value//\//_}"
+  local now line last_ts last_value
+  now=$(date +%s%3N)
+  if [[ -f "$guard" ]]; then
+    line=$(<"$guard")
+    last_ts=${line%% *}
+    last_value=${line#* }
+    if [[ "$last_value" == "$value" ]] && [[ -n "$last_ts" ]] && (( now - last_ts < window_ms )); then
+      return 1
+    fi
+  fi
+  printf '%s %s\n' "$now" "$value" > "$guard"
+  return 0
+}
+
+# A switch request carries no distinguishing value, so repeats are collapsed on
+# scope alone.
+# Switch requests get a much wider window than focus reports. One keypress has
+# been observed arriving as two pipe deliveries up to ~90ms apart — the scripts
+# take tens of milliseconds, so the duplicate queues behind the first — and each
+# delivery advances the stack, so the switch overshoots. Deliberate repeats
+# while holding the modifier are slower than this.
+function claim_switch() {
+  claim_focus_window "switch-$1" 200
+}
+
+function claim_focus() {
+  claim_focus_window "$1" 40
+}
+
+# A `load_plugins` plugin is instantiated once per client, and the instances
+# outlive their client: every past attach leaves one that still answers keybind
+# pipes and still reports focus. Only the live client's instance should act.
+#
+# The client list is cached briefly — this runs on the switching path, and
+# `zellij action` costs a couple of hundred milliseconds.
+function require_live_client() {
+  local -r client=$1
+  local -r cache="/tmp/switch.$SWITCH_APP.clients"
+  local -r ttl_ms=2000
+  local now line ts clients
+  [[ -n "$client" ]] || return 0        # older plugin builds pass nothing
+  now=$(date +%s%3N)
+  clients=""
+  if [[ -f "$cache" ]]; then
+    line=$(head -1 "$cache")
+    ts=${line%% *}
+    # The timestamp lives in the file: asking `stat` for sub-second mtime is not
+    # portable, and a malformed value here would break the arithmetic below.
+    if [[ "$ts" =~ ^[0-9]+$ ]] && (( now - ts < ttl_ms )); then
+      clients=$(tail -n +2 "$cache")
+    fi
+  fi
+  if [[ -z "$clients" ]]; then
+    clients=$(zj list-clients 2>/dev/null | awk 'NR>1{print $1}')
+    # If zellij cannot be asked, do not block: better a stray duplicate than a
+    # dead keybinding.
+    [[ -n "$clients" ]] || return 0
+    { echo "$now"; echo "$clients"; } > "$cache"
+  fi
+  grep -qx "$client" <<< "$clients"
+}
+
+# True at most once per window_ms, for work that need not happen every time.
+function claim_interval() {
+  local -r name=$1 window_ms=$2
+  local -r guard="/tmp/switch.$SWITCH_APP.$name.interval"
+  local now last
+  now=$(date +%s%3N)
+  if [[ -f "$guard" ]]; then
+    last=$(<"$guard")
+    if [[ -n "$last" ]] && (( now - last < window_ms )); then
+      return 1
+    fi
+  fi
+  echo "$now" > "$guard"
+  return 0
+}
+
 function list_file_contains() {
   grep -c "^$1\$" "$2"
 }

@@ -27,6 +27,12 @@ const PIPE_NAME: &str = "switch";
 
 #[derive(Default)]
 struct State {
+    tag: String,
+    /// The client this instance belongs to. A `load_plugins` plugin is
+    /// instantiated once per client and the instances outlive their client, so
+    /// every past attach leaves one behind that still answers keybind pipes.
+    /// Passing the id lets the scripts ignore all but the live client's.
+    client_id: u16,
     scripts_dir: String,
     /// Name of the session we are running in, from SessionUpdate.
     session: Option<String>,
@@ -70,6 +76,7 @@ impl State {
                 &session,
                 &tab_id.to_string(),
                 &format!("terminal_{pane_id}"),
+                &self.client_id.to_string(),
             ],
             BTreeMap::new(),
         );
@@ -94,7 +101,13 @@ impl ZellijPlugin for State {
             EventType::TabUpdate,
             EventType::PaneUpdate,
         ]);
-        eprintln!("switch-zellij: loaded, scripts_dir={}", self.scripts_dir);
+        let ids = get_plugin_ids();
+        self.client_id = ids.client_id;
+        self.tag = format!("p{}c{}", ids.plugin_id, ids.client_id);
+        eprintln!(
+            "switch-zellij: loaded, scripts_dir={} tag={}",
+            self.scripts_dir, self.tag
+        );
     }
 
     fn update(&mut self, event: Event) -> bool {
@@ -146,6 +159,7 @@ impl ZellijPlugin for State {
             eprintln!("switch-zellij: pipe before the session is known, ignoring");
             return false;
         };
+        let source = format!("{:?}", message.source);
         let payload = message.payload.unwrap_or_default();
         let (script, reverse) = match payload.trim() {
             "tab" => ("switch.sh", false),
@@ -158,11 +172,15 @@ impl ZellijPlugin for State {
             }
         };
         let path = format!("{}/{}", self.scripts_dir, script);
-        let mut args: Vec<&str> = vec![&path, &session];
+        let client = self.client_id.to_string();
+        let mut args: Vec<&str> = vec![&path, &session, &client];
         if reverse {
             args.push("--reverse");
         }
-        eprintln!("switch-zellij: switching {payload} for {session}");
+        eprintln!(
+            "switch-zellij: switching {payload} for {session} tag={} source={source}",
+            self.tag
+        );
         run_command(&args, BTreeMap::new());
         false
     }

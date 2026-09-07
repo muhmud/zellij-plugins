@@ -9,7 +9,22 @@ SCRIPT_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
 SWITCH_SESSION_ID="$1"
 TAB_ID="$2"
 PANE_ID="$3"
+CLIENT_ID="${4:-}"
 source "$SCRIPT_DIR/switch-zellij.sh"
+
+require_live_client "$CLIENT_ID" || exit 0
+
+# Duplicate reports of the *same* focus are collapsed; a report of a different
+# focus is always recorded, however fast it arrives. The plugin's values are
+# taken at face value: they come from the focus event itself, so they are
+# accurate at the moment they were produced — verifying them against a live
+# query costs hundreds of milliseconds and records the wrong thing when focus
+# has moved on in the meantime.
+claim_focus "$TAB_ID/$PANE_ID" || exit 0
+
+# Trace, for working out the order the MRU was actually fed.
+echo "$(date +%s%3N) $SWITCH_SESSION_ID tab=$TAB_ID pane=$PANE_ID" \
+  >> "/tmp/switch.zellij.focus.log"
 
 [[ -f "$SWITCH_SESSION_LIST_FILE" ]] || touch "$SWITCH_SESSION_LIST_FILE"
 [[ -f "$SWITCH_TAB_LIST_FILE" ]] || touch "$SWITCH_TAB_LIST_FILE"
@@ -36,6 +51,12 @@ if [[ ! -f "$SWITCH_TAB_PANE_LIST_FILE" ]]; then
   touch "$SWITCH_TAB_PANE_LIST_FILE"
 fi
 
+# Reconciliation asks zellij what still exists, which costs a few hundred
+# milliseconds — far too slow to run on every focus change, and the recording
+# above is what has to be prompt. Closed tabs and panes are harmless to carry
+# for a few seconds, so sweep at most every 5s.
+if claim_interval reconcile 5000; then
+
 # Drop panes that have since closed.
 align_list_file "$SWITCH_TAB_PANE_LIST_FILE" "$(get_pane_list "$TAB_ID")" |
   while IFS= read -r id; do
@@ -50,6 +71,8 @@ align_list_file "$SWITCH_TAB_LIST_FILE" "$(get_tab_list)" |
     switch --request delete-app --socket-file "$SWITCH_SOCKET_FILE" --app "$SWITCH_APP-$id" || true
     rm -f "$SWITCH_TAB_LIST_FILE.$id.panes"
   done
+
+fi
 
 switch --request set --socket-file "$SWITCH_SOCKET_FILE" \
   --app "$SWITCH_APP-$TAB_ID" --id "$PANE_ID" || true
