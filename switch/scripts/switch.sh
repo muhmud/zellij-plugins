@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Move to the next tab in MRU order.
-#   switch.sh <session> [--reverse]
-# Run by the plugin when a keybinding pipes it a "tab" request.
+# Resolve the next tab in MRU order and print its id.
+#   switch.sh <session> <client_id> [--reverse]
+#
+# The plugin does the focusing itself from this output: a `zellij action` call
+# to change tab costs ~75ms, and this script is on the keypress path.
 set -eu -o pipefail
 
 SCRIPT_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
@@ -11,11 +13,6 @@ shift 2 2>/dev/null || shift
 source "$SCRIPT_DIR/switch-zellij.sh"
 
 require_live_client "$CLIENT_ID" || exit 0
-
 claim_switch tab || exit 0
 
-TAB_ID="$(switch --request switch --socket-file "$SWITCH_SOCKET_FILE" \
-  --app "$SWITCH_APP" "$@" || true)"
-if [[ -n "$TAB_ID" ]]; then
-  zj go-to-tab-by-id "$TAB_ID"
-fi
+switch --request switch --socket-file "$SWITCH_SOCKET_FILE" --app "$SWITCH_APP" "$@" || true

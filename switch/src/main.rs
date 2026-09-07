@@ -25,6 +25,11 @@ const DEFAULT_SCRIPTS_DIR: &str = "~/.switch/zellij";
 /// another application.
 const PIPE_NAME: &str = "switch";
 
+/// Marks a command result as ours, and says which stack it came from.
+const CONTEXT_KEY: &str = "switch_scope";
+const SCOPE_TAB: &str = "tab";
+const SCOPE_PANE: &str = "pane";
+
 #[derive(Default)]
 struct State {
     tag: String,
@@ -38,6 +43,9 @@ struct State {
     session: Option<String>,
     /// Position of the active tab, from TabUpdate.
     active_tab: Option<usize>,
+    /// tab_id -> current position. The MRU records stable ids, but focusing a
+    /// tab takes a position, and positions shift as tabs move or close.
+    tab_positions: BTreeMap<usize, u32>,
     /// Stable id of the active tab, which is what `switch` should record —
     /// positions shift when tabs are moved or closed.
     active_tab_id: Option<usize>,
@@ -95,11 +103,15 @@ impl ZellijPlugin for State {
         request_permission(&[
             PermissionType::ReadApplicationState,
             PermissionType::RunCommands,
+            // Focusing a tab or pane is a state change; the plugin does that
+            // itself now rather than shelling out to `zellij action`.
+            PermissionType::ChangeApplicationState,
         ]);
         subscribe(&[
             EventType::SessionUpdate,
             EventType::TabUpdate,
             EventType::PaneUpdate,
+            EventType::RunCommandResult,
         ]);
         let ids = get_plugin_ids();
         self.client_id = ids.client_id;
@@ -121,6 +133,10 @@ impl ZellijPlugin for State {
                 }
             }
             Event::TabUpdate(tabs) => {
+                self.tab_positions = tabs
+                    .iter()
+                    .map(|t| (t.tab_id, t.position as u32))
+                    .collect();
                 if let Some(active) = tabs.iter().find(|t| t.active) {
                     // position indexes into PaneManifest; tab_id is the stable
                     // handle that survives tabs being moved or closed, so that
@@ -144,6 +160,38 @@ impl ZellijPlugin for State {
                     }
                 }
             }
+            Event::RunCommandResult(exit, stdout, _stderr, context) => {
+                let Some(scope) = context.get(CONTEXT_KEY) else {
+                    return false; // not one of ours (set.sh reports nothing)
+                };
+                if exit.unwrap_or(-1) != 0 {
+                    return false;
+                }
+                let id = String::from_utf8_lossy(&stdout).trim().to_string();
+                if id.is_empty() {
+                    return false; // nothing to switch to
+                }
+                match scope.as_str() {
+                    SCOPE_TAB => match id.parse::<usize>().ok().and_then(|tab_id| {
+                        self.tab_positions.get(&tab_id).copied()
+                    }) {
+                        // Positions are 0-based here; the CLI's go-to-tab is not.
+                        Some(position) => {
+                            eprintln!("switch-zellij: focusing tab id={id} position={position}");
+                            switch_tab_to(position + 1);
+                        }
+                        None => eprintln!("switch-zellij: no position known for tab id={id}"),
+                    },
+                    SCOPE_PANE => match id.strip_prefix("terminal_").and_then(|n| n.parse().ok()) {
+                        Some(pane) => {
+                            eprintln!("switch-zellij: focusing pane {id}");
+                            focus_pane_with_id(PaneId::Terminal(pane), false, false);
+                        }
+                        None => eprintln!("switch-zellij: unparseable pane id={id}"),
+                    },
+                    _ => {}
+                }
+            }
             _ => {}
         }
         false
@@ -161,11 +209,11 @@ impl ZellijPlugin for State {
         };
         let source = format!("{:?}", message.source);
         let payload = message.payload.unwrap_or_default();
-        let (script, reverse) = match payload.trim() {
-            "tab" => ("switch.sh", false),
-            "tab-reverse" => ("switch.sh", true),
-            "pane" => ("pane-switch.sh", false),
-            "pane-reverse" => ("pane-switch.sh", true),
+        let (script, scope, reverse) = match payload.trim() {
+            "tab" => ("switch.sh", SCOPE_TAB, false),
+            "tab-reverse" => ("switch.sh", SCOPE_TAB, true),
+            "pane" => ("pane-switch.sh", SCOPE_PANE, false),
+            "pane-reverse" => ("pane-switch.sh", SCOPE_PANE, true),
             other => {
                 eprintln!("switch-zellij: unknown pipe payload {other:?}");
                 return false;
@@ -173,15 +221,25 @@ impl ZellijPlugin for State {
         };
         let path = format!("{}/{}", self.scripts_dir, script);
         let client = self.client_id.to_string();
+        // The pane script needs the tab whose stack to walk; the plugin already
+        // knows it, which saves the script a `zellij action` round trip.
+        let active_tab_id = self.active_tab_id.unwrap_or_default().to_string();
         let mut args: Vec<&str> = vec![&path, &session, &client];
+        if scope == SCOPE_PANE {
+            args.push(&active_tab_id);
+        }
         if reverse {
             args.push("--reverse");
         }
+        // The script resolves an id and prints it; the focusing is done here,
+        // from the result, so no `zellij action` process is needed for it.
+        let mut context = BTreeMap::new();
+        context.insert(CONTEXT_KEY.to_string(), scope.to_string());
         eprintln!(
-            "switch-zellij: switching {payload} for {session} tag={} source={source}",
+            "switch-zellij: asking for {payload} in {session} tag={} source={source}",
             self.tag
         );
-        run_command(&args, BTreeMap::new());
+        run_command(&args, context);
         false
     }
 
