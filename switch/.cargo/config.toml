@@ -1,6 +1,0 @@
-# The host toolchain's bundled ld.lld is broken on this machine (a nix wrapper
-# referencing a garbage-collected store path), which breaks build scripts and
-# proc macros. Route host links through a wrapper that drops the lld flags.
-# Only needed here; reinstalling the stable toolchain would remove it.
-[target.x86_64-unknown-linux-gnu]
-linker = "/home/muhmud/code/github/muhmud/zellij-plugins/switch/build/host-cc"

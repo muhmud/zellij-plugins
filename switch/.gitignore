@@ -1,1 +1,6 @@
 /target
+
+# Local workaround for a broken rustup toolchain on one machine; unnecessary
+# under `nix develop`. See README.
+/.cargo/
+/build/

@@ -27,6 +27,15 @@ moved or closed — so the MRU records `tab_id`. Pane ids are per-kind, hence th
 
 ## Build
 
+With nix, from the repo root:
+
+```sh
+nix build .#switch          # -> result/bin/switch-zellij.wasm
+nix develop                 # a shell with rust + the wasm32-wasip1 target
+```
+
+Or with cargo directly:
+
 ```sh
 cargo build --release --target wasm32-wasip1
 ```
@@ -36,16 +45,21 @@ Output: `target/wasm32-wasip1/release/switch-zellij.wasm`.
 `zellij-tile` is pinned to the 0.44 line to match zellij 0.44.3 — a plugin
 built against a different API than the host will not load.
 
-> `.cargo/config.toml` routes host links through `build/host-cc`, working
-> around a broken rustup toolchain on this machine (its bundled `ld.lld` is a
-> nix wrapper pointing at a garbage-collected store path). Reinstalling the
-> stable toolchain, or building in a nix devshell, makes that unnecessary.
+> A cargo build needs a toolchain with the `wasm32-wasip1` target; `nix develop`
+> provides one. If a local rustup toolchain has a broken bundled linker (its
+> `ld.lld` being a nix wrapper pointing at a garbage-collected store path), host
+> links can be routed around it with an untracked `.cargo/config.toml` setting
+> `[target.<host>] linker` to a wrapper that drops `-fuse-ld=lld` and the
+> `-B .../gcc-ld` argument — see `build/host-cc`. Both are gitignored, being
+> specific to one machine.
 
 ## Install
 
 ```kdl
 // config.kdl
 plugins {
+    // Any of: a nix store path from `nix build .#switch`, a copy under
+    // ~/.config/zellij/plugins, or an https URL to a release asset.
     switch-zellij location="file:~/.config/zellij/plugins/switch-zellij.wasm" {
         set_script "~/.switch/zellij/set.sh"
     }
@@ -78,17 +92,14 @@ Verified working:
 - shell helpers read live state correctly (`get_tab_list`, `get_pane_list`,
   `get_session_list`)
 
-Not yet solved — **the trigger**. Zellij keybindings can only `Run` a command,
-and every `Run` creates a visible pane, so binding `switch.sh` to a key
-reintroduces a brief flash (~18ms even when the script re-execs detached and
-exits immediately). Options:
+The trigger needs no zellij keybinding: `switch` gained `--key`/`--exec`, so
+its daemon watches for the chord on the input device and runs the focus command
+itself. That avoids zellij's constraint that a bound command can only run in a
+new pane, which would flash on screen every time. `set.sh` registers the apps
+that way; `switch.sh`/`pane-switch.sh` remain for a binding-driven setup.
 
-1. Accept the flash.
-2. Teach `switch`'s server to execute a command itself when the modifier
-   chord fires. It already reads the keyboard via libinput, so it needs no
-   help from the multiplexer — and this would let tmux drop its own
-   `run-shell` bindings too. This is the clean fix, and `switch` is ours to
-   change.
+Only the libinput backend watches trigger keys, so the daemon must be started
+with `--use-libinput`.
 
 ## Layout
 
