@@ -17,4 +17,4 @@ source "$SCRIPT_DIR/switch-zellij.sh"
 require_live_client "$CLIENT_ID" || exit 0
 claim_switch tab || exit 0
 
-switch --request switch --socket-file "$SWITCH_SOCKET_FILE" --app "$SWITCH_APP" "$@" || true
+switch_to_live "$SWITCH_APP" "$(live_tab_ids)" get_tab_list "$@"

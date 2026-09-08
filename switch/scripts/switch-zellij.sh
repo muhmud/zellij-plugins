@@ -219,6 +219,92 @@ function history_order() {
   tac "$SWITCH_TAB_HISTORY_FILE" | awk 'NF && !seen[$0]++' | tac
 }
 
+# zellij's own session metadata, which it rewrites about once a second. Reading
+# it is free; asking a session over the CLI costs a ~270ms round trip, far too
+# slow for the keypress path.
+function metadata_file() {
+  local file
+  for file in "$HOME"/.cache/zellij/*/session_info/"${1:-$SWITCH_SESSION_ID}"/session-metadata.kdl; do
+    if [[ -f "$file" ]]; then
+      echo "$file"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Tabs that actually exist, one id per line. Empty means "could not tell" —
+# never "none left".
+function live_tab_ids() {
+  local file
+  if file="$(metadata_file)"; then
+    awk '/^    tab \{/ { intab = 1; next }
+         intab && $1 == "tab_id" { print $2; intab = 0 }' "$file"
+  else
+    get_tab_list
+  fi
+}
+
+# Panes that actually exist in one tab, as terminal_<n>, one per line.
+function live_pane_ids() {
+  local -r tab_id=$1
+  local file
+  if file="$(metadata_file)"; then
+    awk -v want="$tab_id" '
+      /^    tab \{/ { intab = 1; pos = ""; next }
+      intab && $1 == "position" { pos = $2; next }
+      intab && $1 == "tab_id" { if ($2 == want) wantpos = pos; intab = 0; next }
+      /^    pane \{/ { split("", f); inpane = 1; next }
+      inpane && /^    \}/ {
+        inpane = 0
+        if (f["is_plugin"] == "true" || f["exited"] == "true" || f["is_suppressed"] == "true") next
+        if (wantpos != "" && f["tab_position"] == wantpos) print "terminal_" f["id"]
+        next
+      }
+      inpane {
+        key = $1
+        val = $0
+        sub(/^[[:space:]]*[a-z_]+[[:space:]]*/, "", val)
+        gsub(/^"|"$/, "", val)
+        f[key] = val
+      }' "$file"
+  else
+    get_pane_list "$tab_id"
+  fi
+}
+
+# Ask the daemon for the next id in an app's stack, skipping any that no longer
+# exist — and dropping those from the stack as it goes.
+#
+# A dead id in the stack is otherwise a press that does nothing: the plugin has
+# no tab to focus, so nothing moves, and only the *next* press steps past it.
+# They accumulate because reconciliation works off the list file, which cannot
+# describe an id the daemon kept but the file has already forgotten.
+function switch_to_live() {
+  local -r app=$1 live=$2 verify=$3
+  shift 3
+  local id fresh attempt
+  for attempt in 1 2 3 4 5 6 7 8; do
+    id="$(switch --request switch --socket-file "$SWITCH_SOCKET_FILE" --app "$app" "$@" || true)"
+    [[ -n "$id" ]] || return 0
+    # An empty live list means the read failed, not that everything closed.
+    if [[ -z "${live//[[:space:]]/}" ]] || grep -qx -- "$id" <<< "$live"; then
+      echo "$id"
+      return 0
+    fi
+    # The metadata cache can be a second behind, so its word alone is not enough
+    # to throw an id away: a tab created a moment ago would not be in it yet.
+    # This costs a CLI round trip, but only on the rare press that would
+    # otherwise have done nothing at all.
+    fresh="$($verify)"
+    if [[ -z "${fresh//[[:space:]]/}" ]] || grep -qx -- "$id" <<< "$fresh"; then
+      echo "$id"
+      return 0
+    fi
+    switch --request delete --socket-file "$SWITCH_SOCKET_FILE" --app "$app" --id "$id" >/dev/null 2>&1 || true
+  done
+}
+
 function list_file_contains() {
   grep -c "^$1\$" "$2"
 }
@@ -242,8 +328,10 @@ function delete_from_list_file() {
   fi
 }
 
-# Emit ids present in the list file but gone from the live list, removing them
-# as it goes — the caller deletes them from `switch` too.
+# Emit ids present in the list file but gone from the live list. The caller
+# deletes them from `switch` and, only once that has worked, from the list file
+# with `forget_id` — dropping the file entry first would hide an id the daemon
+# still holds, and reconciliation could never see it again.
 function align_list_file() {
   local -r list_file=$1 new_list=$2
   [[ -f "$list_file" ]] || return 0
@@ -261,8 +349,15 @@ function align_list_file() {
   done < "$list_file"
   for id in "${ids[@]}"; do
     echo "$id"
-    delete_from_list_file "$id" "$list_file"
   done
+}
+
+# Drop an id from a list file now that the daemon has confirmed the delete.
+function forget_id() {
+  local -r id=$1 list_file=$2 status=$3
+  if [[ "$status" == "0" ]]; then
+    delete_from_list_file "$id" "$list_file"
+  fi
 }
 
 function get_session_list() {

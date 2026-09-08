@@ -19,4 +19,7 @@ source "$SCRIPT_DIR/switch-zellij.sh"
 require_live_client "$CLIENT_ID" || exit 0
 claim_switch "pane-$TAB_ID" || exit 0
 
-switch --request switch --socket-file "$SWITCH_SOCKET_FILE" --app "$SWITCH_APP-$TAB_ID" "$@" || true
+# Authoritative second opinion, used only when an id looks dead.
+function verify_panes() { get_pane_list "$TAB_ID"; }
+
+switch_to_live "$SWITCH_APP-$TAB_ID" "$(live_pane_ids "$TAB_ID")" verify_panes "$@"

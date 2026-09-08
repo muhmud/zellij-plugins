@@ -65,19 +65,29 @@ if claim_interval reconcile 5000; then
 
 reap_orphan_daemons
 
-# Drop panes that have since closed.
-align_list_file "$SWITCH_TAB_PANE_LIST_FILE" "$(get_pane_list "$TAB_ID")" |
+# Drop panes that have since closed. The live sets come from zellij's session
+# metadata cache, so the sweep costs a file read rather than a CLI round trip
+# per tab.
+align_list_file "$SWITCH_TAB_PANE_LIST_FILE" "$(live_pane_ids "$TAB_ID")" |
   while IFS= read -r id; do
+    status=0
     switch --request delete --socket-file "$SWITCH_SOCKET_FILE" \
-      --app "$SWITCH_APP-$TAB_ID" --id "$id" || true
+      --app "$SWITCH_APP-$TAB_ID" --id "$id" || status=$?
+    # Only forget it here once the daemon has really dropped it, or the stack
+    # would keep an id nothing can see any more.
+    forget_id "$id" "$SWITCH_TAB_PANE_LIST_FILE" "$status"
   done
 
 # ...and tabs that have closed, along with their per-tab app.
-align_list_file "$SWITCH_TAB_LIST_FILE" "$(get_tab_list)" |
+align_list_file "$SWITCH_TAB_LIST_FILE" "$(live_tab_ids)" |
   while IFS= read -r id; do
-    switch --request delete --socket-file "$SWITCH_SOCKET_FILE" --app "$SWITCH_APP" --id "$id" || true
+    status=0
+    switch --request delete --socket-file "$SWITCH_SOCKET_FILE" --app "$SWITCH_APP" --id "$id" || status=$?
     switch --request delete-app --socket-file "$SWITCH_SOCKET_FILE" --app "$SWITCH_APP-$id" || true
-    rm -f "$SWITCH_TAB_LIST_FILE.$id.panes"
+    forget_id "$id" "$SWITCH_TAB_LIST_FILE" "$status"
+    if [[ "$status" == "0" ]]; then
+      rm -f "$SWITCH_TAB_LIST_FILE.$id.panes"
+    fi
   done
 
 fi
