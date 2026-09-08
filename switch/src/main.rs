@@ -10,9 +10,13 @@
 //! ids.
 //!
 //! Configuration (KDL, in the plugin block):
-//!   set_script "/path/to/set.sh"   default: ~/.switch/zellij/set.sh
+//!   scripts_dir "/path/to/scripts"   default: ~/.switch/zellij
 //!
-//! The script is invoked as: set.sh <session> <tab_id> <pane_id>
+//! Focus is reported as: set.sh <session> <tab_id> <pane_id> <client_id>
+//!
+//! Keybindings reach the plugin with `MessagePlugin`, piping name "switch" and
+//! a payload: `tab`/`tab-reverse` and `pane`/`pane-reverse` for MRU switching,
+//! `wd` to jump to the wd work screen wherever it lives.
 
 use std::collections::{BTreeMap, BTreeSet};
 use zellij_tile::prelude::*;
@@ -29,6 +33,7 @@ const PIPE_NAME: &str = "switch";
 const CONTEXT_KEY: &str = "switch_scope";
 const SCOPE_TAB: &str = "tab";
 const SCOPE_PANE: &str = "pane";
+const SCOPE_GOTO: &str = "goto";
 
 #[derive(Default)]
 struct State {
@@ -106,6 +111,11 @@ impl State {
             "tab-reverse" => ("switch.sh", SCOPE_TAB, true),
             "pane" => ("pane-switch.sh", SCOPE_PANE, false),
             "pane-reverse" => ("pane-switch.sh", SCOPE_PANE, true),
+            // Not an MRU switch: jump to a specific window wherever it lives.
+            // `SwitchSession` cannot do this, being a no-op when already in the
+            // named session, and tab focus by name is not bindable — so it goes
+            // through here, where both cases can be handled.
+            "wd" => ("goto-wd.sh", SCOPE_GOTO, false),
             other => {
                 eprintln!("switch-zellij: unknown pipe payload {other:?}");
                 return;
@@ -260,6 +270,39 @@ impl ZellijPlugin for State {
                         }
                         None => eprintln!("switch-zellij: no position known for tab id={id}"),
                     },
+                    // "<session> <tab position> terminal_<pane>": a place to go,
+                    // possibly in another session.
+                    SCOPE_GOTO => {
+                        let mut parts = id.split_whitespace();
+                        let target = parts.next().map(str::to_string);
+                        let position: Option<usize> = parts.next().and_then(|p| p.parse().ok());
+                        let pane: Option<u32> = parts
+                            .next()
+                            .and_then(|p| p.strip_prefix("terminal_"))
+                            .and_then(|n| n.parse().ok());
+                        match (target, position, pane) {
+                            (Some(target), Some(position), Some(pane)) => {
+                                if Some(target.as_str()) == self.session.as_deref() {
+                                    eprintln!(
+                                        "switch-zellij: goto here tab position={position} pane={pane}"
+                                    );
+                                    // Positions are 0-based here; switch_tab_to is not.
+                                    switch_tab_to(position as u32 + 1);
+                                    focus_pane_with_id(PaneId::Terminal(pane), false, false);
+                                } else {
+                                    eprintln!(
+                                        "switch-zellij: goto session={target} tab position={position} pane={pane}"
+                                    );
+                                    switch_session_with_focus(
+                                        &target,
+                                        Some(position),
+                                        Some((pane, false)),
+                                    );
+                                }
+                            }
+                            _ => eprintln!("switch-zellij: unparseable goto target {id:?}"),
+                        }
+                    }
                     SCOPE_PANE => match id.strip_prefix("terminal_").and_then(|n| n.parse().ok()) {
                         Some(pane) => {
                             eprintln!("switch-zellij: focusing pane {id}");

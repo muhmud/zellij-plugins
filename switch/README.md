@@ -92,11 +92,31 @@ Verified working:
 - shell helpers read live state correctly (`get_tab_list`, `get_pane_list`,
   `get_session_list`)
 
-The trigger needs no zellij keybinding: `switch` gained `--key`/`--exec`, so
-its daemon watches for the chord on the input device and runs the focus command
-itself. That avoids zellij's constraint that a bound command can only run in a
-new pane, which would flash on screen every time. `set.sh` registers the apps
-that way; `switch.sh`/`pane-switch.sh` remain for a binding-driven setup.
+## Triggers
+
+Bindings reach the plugin through `MessagePlugin`, which delivers to a
+background plugin without creating a pane — a bound *command* can only run in a
+new pane, which flashes on screen every time. The binding must name the plugin
+by its **alias**, not its URL:
+
+```kdl
+bind "Alt a"       { MessagePlugin "switch-zellij" { name "switch"; payload "tab" } }
+bind "Alt Shift a" { MessagePlugin "switch-zellij" { name "switch"; payload "tab-reverse" } }
+bind "Ctrl tab"    { MessagePlugin "switch-zellij" { name "switch"; payload "pane" } }
+bind "Alt y"       { MessagePlugin "switch-zellij" { name "switch"; payload "wd" } }
+```
+
+| payload | effect |
+|---|---|
+| `tab` / `tab-reverse` | next/previous tab in MRU order |
+| `pane` / `pane-reverse` | next/previous pane within the active tab |
+| `wd` | jump to the unfiltered `wd` work screen, in whichever session holds it |
+
+`wd` is not an MRU switch. It exists here because the native `SwitchSession`
+is a **no-op when you are already in the named session**, and tab focus by name
+is not bindable — so neither native action can express "go to that window,
+wherever it is". The plugin can: same session focuses the tab, another session
+uses `switch_session_with_focus`.
 
 Only the libinput backend watches trigger keys, so the daemon must be started
 with `--use-libinput`.
@@ -108,3 +128,6 @@ with `--use-libinput`.
 - `scripts/set.sh` — record focus; daemon startup, app registration, cleanup
 - `scripts/switch.sh` — next/previous tab in MRU order
 - `scripts/pane-switch.sh` — next/previous pane within the active tab
+- `scripts/add-tabs.sh` — register tabs created in a burst, and replay the
+  focus history so seeding cannot leave the MRU out of order
+- `scripts/goto-wd.sh` — locate the unfiltered `wd` work screen
