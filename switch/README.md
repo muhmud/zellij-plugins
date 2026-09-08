@@ -118,6 +118,10 @@ is not bindable — so neither native action can express "go to that window,
 wherever it is". The plugin can: same session focuses the tab, another session
 uses `switch_session_with_focus`.
 
+`SessionUpdate` carries the pane manifest of the current session, so a screen in
+this session is found in-process, with no subprocess at all. It does *not* carry
+other sessions' panes, so those fall back to `goto-wd.sh`.
+
 Only the libinput backend watches trigger keys, so the daemon must be started
 with `--use-libinput`.
 
@@ -130,4 +134,7 @@ with `--use-libinput`.
 - `scripts/pane-switch.sh` — next/previous pane within the active tab
 - `scripts/add-tabs.sh` — register tabs created in a burst, and replay the
   focus history so seeding cannot leave the MRU out of order
-- `scripts/goto-wd.sh` — locate the unfiltered `wd` work screen
+- `scripts/goto-wd.sh` — locate the unfiltered `wd` work screen; only a
+  fallback, for when the plugin's own session state does not cover the session
+  holding it. Reads zellij's `session_info` metadata cache rather than asking
+  each session, which costs a ~270ms round trip apiece

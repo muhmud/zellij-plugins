@@ -63,6 +63,15 @@ struct State {
     active_tab_id: Option<usize>,
     /// Last (tab, pane) we reported, so repeated events are not re-sent.
     last: Option<(usize, u32)>,
+    /// Panes of *every* live session, from SessionUpdate: (name, is_current,
+    /// tab position -> panes). This is what makes the `wd` jump instant: the
+    /// target can be found here rather than by asking the CLI about each
+    /// session in turn, which costs a process and a round trip apiece.
+    session_panes: Vec<(String, bool, PaneManifest)>,
+    /// Clients currently connected to this session, from SessionUpdate. A
+    /// `load_plugins` instance outlives its client, so this is how an instance
+    /// left behind by a past attach knows not to act on a keypress.
+    connected_clients: BTreeSet<u16>,
 }
 
 register_plugin!(State);
@@ -102,7 +111,80 @@ impl State {
     }
 }
 
+/// Does this command line belong to the unfiltered wd work screen — the one
+/// listing every feature? Identified by what runs in the pane, since zellij
+/// exposes no per-tab metadata to tag it with (the tmux integration uses a
+/// `@wd_screen` option).
+fn is_wd_screen(cmd: &str) -> bool {
+    let mut argv = cmd.split_whitespace();
+    let Some(bin) = argv.next() else {
+        return false;
+    };
+    if bin.rsplit('/').next() != Some("wd") {
+        return false;
+    }
+    let rest: Vec<&str> = argv.collect();
+    // Neither feature- nor CI-scoped: those are the per-scope screens.
+    rest.contains(&"screen") && !rest.contains(&"--feature") && !rest.contains(&"--ci")
+}
+
 impl State {
+    /// Where the wd work screen is: (session, tab position, pane id).
+    fn find_wd_screen(&self) -> Option<(String, usize, u32)> {
+        // This session first: finding it here costs no session switch.
+        let ordered = self
+            .session_panes
+            .iter()
+            .filter(|(_, is_current, _)| *is_current)
+            .chain(
+                self.session_panes
+                    .iter()
+                    .filter(|(_, is_current, _)| !*is_current),
+            );
+        for (name, _, manifest) in ordered {
+            for (tab_position, panes) in manifest.panes.iter() {
+                for pane in panes {
+                    if pane.is_plugin || pane.exited || pane.is_suppressed {
+                        continue;
+                    }
+                    // A pane launched by a wd session layout carries the
+                    // command; a screen started by hand in a shell is a plain
+                    // shell pane, where zellij tracks the running command as
+                    // the title instead.
+                    let cmd = pane
+                        .terminal_command
+                        .as_deref()
+                        .filter(|c| !c.is_empty())
+                        .unwrap_or(&pane.title);
+                    if is_wd_screen(cmd) {
+                        return Some((name.clone(), *tab_position, pane.id));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Focus a tab and pane, switching session if it is somewhere else.
+    fn goto(&self, target: &str, position: usize, pane: u32) {
+        if Some(target) == self.session.as_deref() {
+            eprintln!("switch-zellij: goto here tab position={position} pane={pane}");
+            // Positions are 0-based here; switch_tab_to is not.
+            switch_tab_to(position as u32 + 1);
+            focus_pane_with_id(PaneId::Terminal(pane), false, false);
+        } else {
+            eprintln!("switch-zellij: goto session={target} tab position={position} pane={pane}");
+            switch_session_with_focus(target, Some(position), Some((pane, false)));
+        }
+    }
+
+    /// Is this instance's client still attached? An instance whose client has
+    /// gone must ignore keypresses, or one press acts several times.
+    fn client_is_live(&self) -> bool {
+        // Nothing heard yet: be permissive rather than drop the press.
+        self.connected_clients.is_empty() || self.connected_clients.contains(&self.client_id)
+    }
+
     /// Ask the daemon for the next id in the requested stack. The focusing
     /// happens later, when the command result comes back.
     fn dispatch_switch(&mut self, session: &str, payload: &str) {
@@ -201,12 +283,19 @@ impl ZellijPlugin for State {
         match event {
             Event::SessionUpdate(sessions, _) => {
                 if let Some(current) = sessions.iter().find(|s| s.is_current_session) {
+                    // tab_history is keyed by connected client, so its keys are
+                    // the live clients.
+                    self.connected_clients = current.tab_history.keys().copied().collect();
                     if self.session.as_deref() != Some(current.name.as_str()) {
                         eprintln!("switch-zellij: session={}", current.name);
                         self.session = Some(current.name.clone());
                         self.flush_pending();
                     }
                 }
+                self.session_panes = sessions
+                    .iter()
+                    .map(|s| (s.name.clone(), s.is_current_session, s.panes.clone()))
+                    .collect();
             }
             Event::TabUpdate(tabs) => {
                 self.tab_positions = tabs
@@ -271,7 +360,8 @@ impl ZellijPlugin for State {
                         None => eprintln!("switch-zellij: no position known for tab id={id}"),
                     },
                     // "<session> <tab position> terminal_<pane>": a place to go,
-                    // possibly in another session.
+                    // possibly in another session. Only reached when the fast
+                    // in-plugin lookup came up empty.
                     SCOPE_GOTO => {
                         let mut parts = id.split_whitespace();
                         let target = parts.next().map(str::to_string);
@@ -282,23 +372,7 @@ impl ZellijPlugin for State {
                             .and_then(|n| n.parse().ok());
                         match (target, position, pane) {
                             (Some(target), Some(position), Some(pane)) => {
-                                if Some(target.as_str()) == self.session.as_deref() {
-                                    eprintln!(
-                                        "switch-zellij: goto here tab position={position} pane={pane}"
-                                    );
-                                    // Positions are 0-based here; switch_tab_to is not.
-                                    switch_tab_to(position as u32 + 1);
-                                    focus_pane_with_id(PaneId::Terminal(pane), false, false);
-                                } else {
-                                    eprintln!(
-                                        "switch-zellij: goto session={target} tab position={position} pane={pane}"
-                                    );
-                                    switch_session_with_focus(
-                                        &target,
-                                        Some(position),
-                                        Some((pane, false)),
-                                    );
-                                }
+                                self.goto(&target, position, pane)
                             }
                             _ => eprintln!("switch-zellij: unparseable goto target {id:?}"),
                         }
@@ -330,7 +404,21 @@ impl ZellijPlugin for State {
         // lets the script fall back to the server's own ZELLIJ_SESSION_NAME.
         let session = self.session.clone().unwrap_or_default();
         let payload = message.payload.unwrap_or_default();
-        self.dispatch_switch(&session, payload.trim());
+        let payload = payload.trim();
+        if payload == "wd" {
+            if !self.client_is_live() {
+                return false;
+            }
+            // SessionUpdate has already delivered every session's panes, so the
+            // target is known here — no process, no CLI round trip. Only if
+            // nothing has arrived yet does this fall back to the script.
+            if let Some((target, position, pane)) = self.find_wd_screen() {
+                self.goto(&target, position, pane);
+                return false;
+            }
+            eprintln!("switch-zellij: no wd screen in cached sessions, asking the script");
+        }
+        self.dispatch_switch(&session, payload);
         false
     }
 
